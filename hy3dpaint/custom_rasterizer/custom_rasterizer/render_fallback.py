@@ -34,15 +34,16 @@ def rasterize_cpu_fallback(pos: torch.Tensor, tri: torch.Tensor, resolution: Tup
     batch_size = pos.shape[0] if len(pos.shape) == 3 else 1
     if len(pos.shape) == 2:
         pos = pos.unsqueeze(0)
-    
+
     width, height = resolution
-    device = pos.device
-    
-    # Initialize output tensors
-    findices = torch.zeros((batch_size, height, width), dtype=torch.long, device=device)
-    barycentric = torch.zeros((batch_size, height, width, 3), dtype=torch.float32, device=device)
-    depth_buffer = torch.full((batch_size, height, width), float('inf'), dtype=torch.float32, device=device)
-    
+    original_device = pos.device
+
+    # Do all rasterization on CPU to avoid numpy/MPS tensor mixing
+    # Initialize output tensors on CPU
+    findices = torch.zeros((batch_size, height, width), dtype=torch.long, device='cpu')
+    barycentric = torch.zeros((batch_size, height, width, 3), dtype=torch.float32, device='cpu')
+    depth_buffer = torch.full((batch_size, height, width), float('inf'), dtype=torch.float32, device='cpu')
+
     # Convert to numpy for CPU processing
     pos_np = pos.detach().cpu().numpy()
     tri_np = tri.detach().cpu().numpy()
@@ -86,16 +87,16 @@ def rasterize_cpu_fallback(pos: torch.Tensor, tri: torch.Tensor, resolution: Tup
                     if a >= 0 and b >= 0 and c >= 0:
                         # Interpolate depth
                         z = a * z0 + b * z1 + c * z2
-                        
+
                         # Depth test
-                        if z < depth_buffer[batch_idx, y, x]:
-                            depth_buffer[batch_idx, y, x] = z
-                            findices[batch_idx, y, x] = face_idx + 1  # 1-indexed
-                            barycentric[batch_idx, y, x, 0] = a
-                            barycentric[batch_idx, y, x, 1] = b
-                            barycentric[batch_idx, y, x, 2] = c
+                        if z < depth_buffer[batch_idx, y, x].item():
+                            depth_buffer[batch_idx, y, x] = float(z)
+                            findices[batch_idx, y, x] = int(face_idx + 1)  # 1-indexed
+                            barycentric[batch_idx, y, x, 0] = float(a)
+                            barycentric[batch_idx, y, x, 1] = float(b)
+                            barycentric[batch_idx, y, x, 2] = float(c)
     
-    return findices, barycentric
+    return findices.to(original_device), barycentric.to(original_device)
 
 
 def interpolate_cpu_fallback(col: torch.Tensor, findices: torch.Tensor, 
@@ -112,17 +113,22 @@ def interpolate_cpu_fallback(col: torch.Tensor, findices: torch.Tensor,
     Returns:
         Interpolated attributes for each pixel
     """
+    # Ensure batch dimension exists
+    if len(findices.shape) == 2:
+        findices = findices.unsqueeze(0)
+        barycentric = barycentric.unsqueeze(0)
+
     # Handle face indexing (convert from 1-indexed to 0-indexed)
     f = findices - 1 + (findices == 0)
     f = torch.clamp(f, 0, len(tri) - 1)
-    
+
     # Get vertex indices for each pixel
     vertex_indices = tri[f.long()]  # [batch, height, width, 3]
-    
+
     # Gather vertex colors
     if len(col.shape) == 2:
         col = col.unsqueeze(0)
-    
+
     batch_size, height, width = findices.shape
     channels = col.shape[-1]
     

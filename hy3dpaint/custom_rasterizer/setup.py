@@ -1,40 +1,60 @@
-# Hunyuan 3D is licensed under the TENCENT HUNYUAN NON-COMMERCIAL LICENSE AGREEMENT
-# except for the third-party components listed below.
-# Hunyuan 3D does not impose any additional limitations beyond what is outlined
-# in the repsective licenses of these third-party components.
-# Users must comply with all terms and conditions of original licenses of these third-party
-# components and must ensure that the usage of the third party components adheres to
-# all relevant laws and regulations.
-
-# For avoidance of doubts, Hunyuan 3D means the large language models and
-# their software and algorithms, including trained model weights, parameters (including
-# optimizer states), machine-learning model code, inference-enabling code, training-enabling code,
-# fine-tuning enabling code and other elements of the foregoing made publicly available
-# by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
-
+# macOS setup for custom_rasterizer with Metal GPU acceleration
+import os
+import subprocess
+import sys
 from setuptools import setup, find_packages
-import torch
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CppExtension
+from torch.utils.cpp_extension import CppExtension, BuildExtension
 
-# build custom rasterizer
+# Paths relative to this setup.py
+base_dir = os.path.dirname(os.path.abspath(__file__))
+kernel_dir = os.path.join(base_dir, "lib", "custom_rasterizer_kernel")
 
-custom_rasterizer_module = CUDAExtension(
-    "custom_rasterizer_kernel",
-    [
-        "lib/custom_rasterizer_kernel/rasterizer.cpp",
-        "lib/custom_rasterizer_kernel/grid_neighbor.cpp",
-        "lib/custom_rasterizer_kernel/rasterizer_gpu.cu",
-    ],
-)
+metal_src = os.path.join(kernel_dir, "rasterizer_metal.metal")
+metal_air = os.path.join(kernel_dir, "rasterizer_metal.air")
+metallib_out = os.path.join(kernel_dir, "rasterizer.metallib")
 
+# Step 1: Compile Metal shaders to .metallib
+print("Compiling Metal shaders...")
+subprocess.run([
+    "xcrun", "-sdk", "macosx", "metal",
+    "-std=metal3.0",
+    "-c", metal_src,
+    "-o", metal_air
+], check=True)
+subprocess.run([
+    "xcrun", "-sdk", "macosx", "metallib",
+    metal_air,
+    "-o", metallib_out
+], check=True)
+# Clean up intermediate .air file
+if os.path.exists(metal_air):
+    os.remove(metal_air)
+print("Metal shaders compiled successfully.")
+
+# Step 2: Build C++/Obj-C++ extension with Metal framework
 setup(
     packages=find_packages(),
-    version="0.1",
+    version="0.2",
     name="custom_rasterizer",
     include_package_data=True,
     package_dir={"": "."},
+    description="Custom rasterizer with Metal GPU acceleration for macOS",
     ext_modules=[
-        custom_rasterizer_module,
+        CppExtension(
+            "custom_rasterizer_kernel",
+            [
+                "lib/custom_rasterizer_kernel/rasterizer.cpp",
+                "lib/custom_rasterizer_kernel/grid_neighbor.cpp",
+                "lib/custom_rasterizer_kernel/rasterizer_metal.mm",
+            ],
+            extra_compile_args={
+                "cxx": ["-std=c++17", "-Wno-c++11-narrowing"],
+            },
+            extra_link_args=[
+                "-framework", "Metal",
+                "-framework", "Foundation",
+            ],
+        ),
     ],
     cmdclass={"build_ext": BuildExtension},
 )

@@ -23,7 +23,8 @@ except ImportError:
     custom_rasterizer_kernel = None
     HAS_CUDA_RASTERIZER = False
     warnings.warn(
-        "Custom CUDA rasterizer not available. Using CPU fallback (slower performance).",
+        "Custom rasterizer kernel not available. Using CPU fallback (slower performance). "
+        "Run setup.py to build the Metal-accelerated kernel on macOS.",
         UserWarning
     )
 
@@ -33,10 +34,10 @@ from .render_fallback import rasterize_cpu_fallback, interpolate_cpu_fallback
 
 def rasterize(pos, tri, resolution, clamp_depth=torch.zeros(0), use_depth_prior=0):
     """
-    Rasterize triangles to screen space with automatic CUDA/CPU fallback
+    Rasterize triangles to screen space with automatic CUDA/Metal/CPU fallback
     """
     assert pos.device == tri.device
-    
+
     if HAS_CUDA_RASTERIZER and pos.device.type == 'cuda':
         # Use CUDA implementation
         try:
@@ -46,8 +47,24 @@ def rasterize(pos, tri, resolution, clamp_depth=torch.zeros(0), use_depth_prior=
             return findices, barycentric
         except Exception as e:
             warnings.warn(f"CUDA rasterizer failed: {e}. Falling back to CPU implementation.")
-    
-    # Use CPU fallback for MPS or when CUDA fails
+
+    if HAS_CUDA_RASTERIZER and pos.device.type in ('mps', 'cpu'):
+        # Metal path — the compiled kernel dispatches to Metal GPU internally
+        # Move tensors to CPU since Metal bridge works with CPU data pointers
+        try:
+            original_device = pos.device
+            pos_cpu = pos.cpu() if pos.device.type == 'mps' else pos
+            tri_cpu = tri.cpu() if tri.device.type == 'mps' else tri
+            depth_cpu = clamp_depth.cpu() if clamp_depth.numel() > 0 and clamp_depth.device.type == 'mps' else clamp_depth
+
+            findices, barycentric = custom_rasterizer_kernel.rasterize_image(
+                pos_cpu[0], tri_cpu, depth_cpu, resolution[1], resolution[0], 1e-6, use_depth_prior
+            )
+            return findices.to(original_device), barycentric.to(original_device)
+        except Exception as e:
+            warnings.warn(f"Metal rasterizer failed: {e}. Falling back to CPU implementation.")
+
+    # CPU fallback (last resort)
     return rasterize_cpu_fallback(pos, tri, resolution, clamp_depth, use_depth_prior)
 
 
